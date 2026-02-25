@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.py[cod]
+*$py.class
+bot.log
+bot_state.json
+signal_history.csv
+.vscode/
+.idea/
+.gemini/
