@@ -97,7 +97,7 @@ def handle_commands(state_mgr, summary_func, analysis_func, fetch_func):
                 send_status(state_mgr, chat_id)
             elif cmd == "/summary":
                 summary = summary_func()
-                send_daily_summary(summary, chat_id)
+                send_daily_summary(summary, state_mgr, chat_id)
             elif cmd == "/price":
                 handle_price_command(args, fetch_func, chat_id)
             elif cmd == "/analyze":
@@ -117,9 +117,6 @@ def handle_commands(state_mgr, summary_func, analysis_func, fetch_func):
             
     except Exception as e:
         if config.DEBUG_MODE: print(f"  ⚠️ Command Check Error: {e}")
-
-
-    send_message(msg, chat_id)
 
 
 # ──────────────────────────────────────────────
@@ -200,7 +197,7 @@ def broadcast_signal(signal: dict, state_mgr) -> bool:
             success = True
     return success
 
-def send_daily_summary(summary: dict, chat_id=None) -> bool:
+def send_daily_summary(summary: dict, state_mgr, chat_id=None) -> bool:
     msg = f"<b>📋 DAILY SUMMARY ({summary['date']})</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
     msg += f"📊 Total Signals: {summary['total_signals']}\n"
     msg += f"🟢 BUY: {summary['buy_signals']}\n"
@@ -216,7 +213,7 @@ def send_daily_summary(summary: dict, chat_id=None) -> bool:
         return send_api_message(msg, chat_id)
     else:
         # Broadcast if no specific chat_id
-        return broadcast_message(msg, None)  # state_mgr needed for broadcast
+        return broadcast_message(msg, state_mgr)
 
 def broadcast_message(text: str, state_mgr) -> bool:
     """Send a plain text message to all subscribers."""

@@ -133,7 +133,7 @@ def run_bot():
                 today = now.strftime("%Y-%m-%d")
                 if now.hour == config.DAILY_SUMMARY_HOUR and today != last_summary_date:
                     summary = get_daily_summary()
-                    broadcast_message(f"<b>📋 DAILY SUMMARY ({summary['date']})</b>\n(Use /summary for details)", state_mgr)
+                    send_daily_summary(summary, state_mgr)
                     last_summary_date = today
                     logger.info("Daily summary notice broadcasted")
 
