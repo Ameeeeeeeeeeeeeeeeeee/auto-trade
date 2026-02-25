@@ -18,7 +18,7 @@ import yfinance as yf
 import pandas as pd
 
 import config
-from signals import check_signal, get_daily_summary
+from signals import check_signal, get_daily_summary, get_market_analysis_data
 from telegram_bot import broadcast_signal, broadcast_message, send_daily_summary, handle_commands
 from state_manager import StateManager
 
@@ -95,7 +95,7 @@ def run_bot():
     while True:
         try:
             # ── Step 1: Manage Commands (Non-blocking) ──
-            handle_commands(state_mgr, get_daily_summary)
+            handle_commands(state_mgr, get_daily_summary, get_market_analysis_data, fetch_data)
 
             now = datetime.now(timezone.utc)
             
@@ -106,7 +106,7 @@ def run_bot():
             if is_trading_hours():
                 for display_name, ticker in config.SYMBOLS.items():
                     # Check for updates again during symbol loop for responsiveness
-                    handle_commands(state_mgr, get_daily_summary)
+                    handle_commands(state_mgr, get_daily_summary, get_market_analysis_data, fetch_data)
 
                     if config.DEBUG_MODE:
                         print(f"  🔍 Scanning {display_name}...")

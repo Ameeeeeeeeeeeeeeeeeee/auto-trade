@@ -108,6 +108,51 @@ def log_signal_to_csv(signal: dict):
 
 
 # ──────────────────────────────────────────────
+#  MARKET ANALYSIS (NEW)
+# ──────────────────────────────────────────────
+def get_market_analysis_data(data: pd.DataFrame, symbol: str) -> dict:
+    """
+    Perform a real-time technical analysis on the provided data.
+    """
+    if len(data) < config.SLOW_EMA + 5:
+        return {"error": "Not enough data for analysis"}
+
+    ema_fast = calculate_ema(data, config.FAST_EMA)
+    ema_slow = calculate_ema(data, config.SLOW_EMA)
+    rsi = calculate_rsi(data, config.RSI_PERIOD)
+    atr = calculate_atr(data, config.ATR_PERIOD)
+    
+    curr_f = ema_fast.iloc[-1]
+    curr_s = ema_slow.iloc[-1]
+    curr_rsi = rsi.iloc[-1]
+    curr_atr = atr.iloc[-1]
+    price = data["Close"].iloc[-1]
+    
+    trend = "UPTREND" if curr_f > curr_s else "DOWNTREND"
+    trend_strong, distance = check_trend_strength(curr_f, curr_s)
+    
+    # RSI Condition
+    rsi_status = "Neutral"
+    if curr_rsi > 70: rsi_status = "Overbought"
+    elif curr_rsi < 30: rsi_status = "Oversold"
+    elif curr_rsi > 50: rsi_status = "Bullish Bias"
+    elif curr_rsi < 50: rsi_status = "Bearish Bias"
+
+    return {
+        "symbol": symbol,
+        "price": round(price, 5),
+        "trend": trend,
+        "trend_strength": "STRONG" if trend_strong else "WEAK/SIDEWAYS",
+        "ema_separation": round(distance, 4),
+        "rsi": round(curr_rsi, 2),
+        "rsi_status": rsi_status,
+        "atr": round(curr_atr, 6),
+        "volatility": "High" if check_volatility(symbol, curr_atr) else "Low/Stable",
+        "timestamp": datetime.now(timezone.utc).strftime("%H:%M UTC")
+    }
+
+
+# ──────────────────────────────────────────────
 #  GET DAILY SUMMARY DATA
 # ──────────────────────────────────────────────
 def get_daily_summary() -> dict:

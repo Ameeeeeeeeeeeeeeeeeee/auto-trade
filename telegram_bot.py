@@ -52,7 +52,7 @@ def format_signal_message(signal: dict) -> str:
 # ──────────────────────────────────────────────
 #  COMMANDS HANDLERS
 # ──────────────────────────────────────────────
-def handle_commands(state_mgr, summary_func):
+def handle_commands(state_mgr, summary_func, analysis_func, fetch_func):
     """
     Check for new commands from Telegram.
     Non-blocking polling using getUpdates.
@@ -73,46 +73,114 @@ def handle_commands(state_mgr, summary_func):
             if "message" not in update or "text" not in update["message"]: continue
             
             chat_id = str(update["message"]["chat"]["id"])
-            if chat_id != config.TELEGRAM_CHAT_ID: continue
+            if chat_id != config.TELEGRAM_CHAT_ID and not state_mgr.is_subscribed(chat_id):
+                # Auto-subscribe if they send /start, otherwise ignore or prompt
+                if update["message"]["text"].lower() != "/start":
+                    continue
 
             text = update["message"]["text"].lower()
+            parts = text.split()
+            cmd = parts[0]
+            args = parts[1:] if len(parts) > 1 else []
             
-            if text == "/start":
+            if cmd == "/start":
                 if state_mgr.subscribe_user(chat_id):
                     send_api_message("<b>✅ Subscribed!</b>\nYou will now receive all trading signals. Send /status to see the current bot state.", chat_id)
                 else:
                     send_api_message("<b>👋 You are already subscribed!</b>", chat_id)
-            elif text == "/stop":
+            elif cmd == "/stop":
                 if state_mgr.unsubscribe_user(chat_id):
                     send_api_message("<b>🚫 Unsubscribed.</b>\nYou will no longer receive signals. Send /start to resubscribe.", chat_id)
                 else:
                     send_api_message("<b>⚠️ You weren't subscribed anyway.</b>", chat_id)
-            elif text == "/status":
+            elif cmd == "/status":
                 send_status(state_mgr, chat_id)
-            elif text == "/summary":
+            elif cmd == "/summary":
                 summary = summary_func()
                 send_daily_summary(summary, chat_id)
-            elif text == "/help":
-                send_message("<b>🤖 Available Commands:</b>\n\n/start - Subscribe to signals\n/stop - Unsubscribe from signals\n/status - Current bot status & active signals\n/summary - Today's signal summary\n/help - Show this message", chat_id)
+            elif cmd == "/price":
+                handle_price_command(args, fetch_func, chat_id)
+            elif cmd == "/analyze":
+                handle_analyze_command(args, fetch_func, analysis_func, chat_id)
+            elif cmd == "/help":
+                msg = (
+                    "<b>🤖 Available Commands:</b>\n\n"
+                    "/start - Subscribe to signals\n"
+                    "/stop - Unsubscribe\n"
+                    "/price [pair] - Get live prices\n"
+                    "/analyze [pair] - Deep technical analysis\n"
+                    "/status - Bot health & active signals\n"
+                    "/summary - Today's results\n"
+                    "/help - Show this list"
+                )
+                send_message(msg, chat_id)
             
     except Exception as e:
         if config.DEBUG_MODE: print(f"  ⚠️ Command Check Error: {e}")
 
 
-def send_status(state_mgr, chat_id=None):
-    active = state_mgr.get_active_signals()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    send_message(msg, chat_id)
+
+
+# ──────────────────────────────────────────────
+#  PRICE & ANALYSIS HANDLERS (NEW)
+# ──────────────────────────────────────────────
+def handle_price_command(args, fetch_func, chat_id):
+    if args:
+        symbol = args[0].upper()
+        ticker = config.SYMBOLS.get(symbol)
+        if not ticker:
+            send_message(f"❌ Unknown symbol: {symbol}. Available: {', '.join(config.SYMBOLS.keys())}", chat_id)
+            return
+        
+        data = fetch_func(ticker, symbol)
+        if data is not None and not data.empty:
+            price = data["Close"].iloc[-1]
+            send_message(f"💰 <b>{symbol} Current Price</b>\nPrice: <code>{price:.5f}</code>", chat_id)
+        else:
+            send_message("❌ Error fetching data.", chat_id)
+    else:
+        # Show all prices
+        msg = "<b>💰 Live Prices</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+        for s, t in config.SYMBOLS.items():
+            data = fetch_func(t, s)
+            if data is not None and not data.empty:
+                msg += f"• {s}: <code>{data['Close'].iloc[-1]:.5f}</code>\n"
+        send_message(msg, chat_id)
+
+def handle_analyze_command(args, fetch_func, analysis_func, chat_id):
+    if not args:
+        send_message("❓ Please specify a pair to analyze. E.g., <code>/analyze XAUUSD</code>", chat_id)
+        return
     
-    msg = f"<b>🤖 Bot Status ({today})</b>\n\n"
-    msg += f"✅ Monitoring {len(config.SYMBOLS)} symbols\n"
-    msg += f"🕒 Timeframe: {config.TIMEFRAME}\n"
-    msg += f"🔥 Active Signals: {len(active)}\n\n"
+    symbol = args[0].upper()
+    ticker = config.SYMBOLS.get(symbol)
+    if not ticker:
+        send_message(f"❌ Unknown symbol: {symbol}. Available: {', '.join(config.SYMBOLS.keys())}", chat_id)
+        return
     
-    if active:
-        msg += "<b>📋 Active List:</b>\n"
-        for s, data in active.items():
-            msg += f"• {s}: {data['type']} @ {data['entry']}\n"
+    send_message(f"🔍 Analyzing {symbol}... Please wait.", chat_id)
+    data = fetch_func(ticker, symbol)
+    if data is None or data.empty:
+        send_message("❌ Error fetching market data.", chat_id)
+        return
     
+    analysis = analysis_func(data, symbol)
+    if "error" in analysis:
+        send_message(f"❌ {analysis['error']}", chat_id)
+        return
+    
+    msg = (
+        f"<b>📊 MARKET ANALYSIS: {symbol}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 Price: <code>{analysis['price']}</code>\n"
+        f"📈 Trend: <b>{analysis['trend']}</b> ({analysis['trend_strength']})\n"
+        f"📏 EMA Sep: <code>{analysis['ema_separation']}%</code>\n"
+        f"💠 RSI: <code>{analysis['rsi']}</code> ({analysis['rsi_status']})\n"
+        f"📉 ATR: <code>{analysis['atr']}</code>\n"
+        f"🌊 Volatility: {analysis['volatility']}\n\n"
+        f"🕒 <i>{analysis['timestamp']}</i>"
+    )
     send_message(msg, chat_id)
 
 
