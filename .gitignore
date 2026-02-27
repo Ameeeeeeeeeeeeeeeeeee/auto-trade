@@ -8,3 +8,5 @@ signal_history.csv
 .vscode/
 .idea/
 .gemini/
+.venv/
+*.png

@@ -1,12 +1,14 @@
 """
 ============================================================
-  MAIN.PY — Trading Signal Bot v2.0 (Advanced)
+  MAIN.PY — Multi-Strategy Trading Bot v3.0
 ============================================================
-  Upgraded with:
+  Features:
+   - 5 Trading Strategies running in parallel
    - Persistence (Bot state survives restart)
-   - Interactive Telegram Commands (/status, /summary, /help)
-   - Advanced Signal Logic (Filter, Cooldown, Expiry)
+   - Interactive Telegram Commands
+   - Chart & Deep Analysis
    - Multi-Symbol Scan
+   - Railway / Cloud deployment ready
 ============================================================
 """
 
@@ -72,25 +74,54 @@ def is_trading_hours() -> bool:
 
 
 # ──────────────────────────────────────────────
+#  ACTIVE STRATEGIES LIST
+# ──────────────────────────────────────────────
+def get_active_strategies() -> list:
+    strategies = []
+    if config.STRATEGY_EMA_PULLBACK: strategies.append("EMA Pullback")
+    if config.STRATEGY_MACD: strategies.append("MACD")
+    if config.STRATEGY_BOLLINGER: strategies.append("Bollinger")
+    if config.STRATEGY_EMA_CROSS: strategies.append("EMA Cross")
+    if config.STRATEGY_RSI_REVERSAL: strategies.append("RSI Reversal")
+    return strategies
+
+
+# ──────────────────────────────────────────────
 #  MAIN BOT LOOP
 # ──────────────────────────────────────────────
 def run_bot():
     # 1. Initialize State Persistence
     state_mgr = StateManager()
-    
+
     # 2. Daily Summary Tracker
     last_summary_date = ""
 
-    print("\n" + "="*50)
-    print("  🤖 TRADING BOT v2.0 — ADVANCED EDITION")
-    print("="*50)
-    print(f"  Symbols:   {', '.join(config.SYMBOLS.keys())}")
-    print(f"  Interval:  {config.CHECK_INTERVAL}s")
-    print(f"  24/7 Scan: {'YES' if config.TRADE_START_HOUR==0 else 'NO'}")
-    print("="*50 + "\n")
+    strategies = get_active_strategies()
 
-    broadcast_message(f"🚀 <b>Trading Bot v2.0 Started!</b>\n\nWatching: <code>{', '.join(config.SYMBOLS.keys())}</code>\nCommands: /start, /status, /summary, /help", state_mgr)
-    logger.info("Bot started version 2.0 with multi-user support")
+    print("\n" + "="*55)
+    print("  🤖 MULTI-STRATEGY TRADING BOT v3.0")
+    print("="*55)
+    print(f"  Symbols:      {', '.join(config.SYMBOLS.keys())}")
+    print(f"  Strategies:   {', '.join(strategies)}")
+    print(f"  Min Score:    {config.MIN_SIGNAL_SCORE}%")
+    print(f"  Interval:     {config.CHECK_INTERVAL}s")
+    print(f"  24/7 Scan:    {'YES' if config.TRADE_START_HOUR==0 else 'NO'}")
+    print("="*55 + "\n")
+
+    startup_msg = (
+        f"🚀 <b>Trading Bot v3.0 Started!</b>\n\n"
+        f"📊 <b>Active Strategies:</b>\n"
+    )
+    for s in strategies:
+        startup_msg += f"  • {s}\n"
+    startup_msg += (
+        f"\n📍 Watching: <code>{', '.join(config.SYMBOLS.keys())}</code>\n"
+        f"🎯 Min Confidence: <code>{config.MIN_SIGNAL_SCORE}%</code>\n"
+        f"\nCommands: /start, /status, /chart, /analyze, /help"
+    )
+
+    broadcast_message(startup_msg, state_mgr)
+    logger.info(f"Bot v3.0 started with strategies: {', '.join(strategies)}")
 
     while True:
         try:
@@ -98,14 +129,14 @@ def run_bot():
             handle_commands(state_mgr, get_daily_summary, get_market_analysis_data, fetch_data)
 
             now = datetime.now(timezone.utc)
-            
+
             # ── Step 2: Hourly Expiry Check & Cleanup ──
             state_mgr.clean_expired_signals()
 
             # ── Step 3: Scan Cycle (if in hours) ──
             if is_trading_hours():
                 for display_name, ticker in config.SYMBOLS.items():
-                    # Check for updates again during symbol loop for responsiveness
+                    # Check for commands during symbol loop for responsiveness
                     handle_commands(state_mgr, get_daily_summary, get_market_analysis_data, fetch_data)
 
                     if config.DEBUG_MODE:
@@ -114,15 +145,14 @@ def run_bot():
                     data = fetch_data(ticker, display_name)
                     if data is None: continue
 
-                    # Check for signal
-                    # Note: check_signal handles cooldown, daily limit, and new candle detection
+                    # Multi-strategy signal check
                     signal = check_signal(data, display_name, state_mgr)
 
                     if signal:
-                        print(f"  🎯 SIGNAL: {signal['type']} {display_name}")
+                        print(f"  🎯 SIGNAL: {signal['type']} {display_name} via {signal['strategy']}")
                         if broadcast_signal(signal, state_mgr):
                             state_mgr.add_active_signal(display_name, signal)
-                            logger.info(f"Signal broadcasted: {signal['type']} {display_name}")
+                            logger.info(f"Signal broadcasted: {signal['type']} {display_name} ({signal['strategy']})")
                         else:
                             print("  ❌ No subscribers to receive the signal")
 
@@ -135,7 +165,7 @@ def run_bot():
                     summary = get_daily_summary()
                     send_daily_summary(summary, state_mgr)
                     last_summary_date = today
-                    logger.info("Daily summary notice broadcasted")
+                    logger.info("Daily summary broadcasted")
 
             # ── Step 5: Sleep ──
             time.sleep(config.CHECK_INTERVAL)

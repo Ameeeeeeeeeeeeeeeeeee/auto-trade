@@ -1,19 +1,19 @@
 """
 ============================================================
-  CONFIG.PY — All Configurable Settings for the Trading Bot
+  CONFIG.PY — All Configurable Settings (v3.0)
 ============================================================
+  Multi-Strategy Trading Bot Configuration
   Edit the values below to customize the bot behavior.
 ============================================================
 """
 
+import os
+
 # ──────────────────────────────────────────────
 #  TELEGRAM SETTINGS
 # ──────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = "8525447911:AAFCw08b0Nw4LWJ1tBkSyCELd1xfYN5R198"
-
-# Optional: Set this to your Chat ID for admin notifications 
-# or as a fallback if the subscriber list is empty.
-TELEGRAM_CHAT_ID = "7246324907"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8525447911:AAFCw08b0Nw4LWJ1tBkSyCELd1xfYN5R198")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7246324907")
 
 # ──────────────────────────────────────────────
 #  MULTI-SYMBOL MONITORING
@@ -29,15 +29,40 @@ TIMEFRAME = "1h"
 DATA_PERIOD = "30d"
 
 # ──────────────────────────────────────────────
+#  STRATEGY TOGGLES (NEW v3.0)
+# ──────────────────────────────────────────────
+# Enable/disable individual strategies
+STRATEGY_EMA_PULLBACK = True     # Original: EMA Pullback + Engulfing
+STRATEGY_MACD = True             # MACD Crossover signals
+STRATEGY_BOLLINGER = True        # Bollinger Band Bounce
+STRATEGY_EMA_CROSS = True        # EMA Fast/Slow Crossover
+STRATEGY_RSI_REVERSAL = True     # RSI Oversold/Overbought Reversal
+
+# Minimum signal confidence score to send (0-100)
+# Higher = fewer but better signals
+MIN_SIGNAL_SCORE = 25
+
+# ──────────────────────────────────────────────
 #  EMA SETTINGS
 # ──────────────────────────────────────────────
 FAST_EMA = 20
 SLOW_EMA = 50
 
-# ── Trend Strength Filter (NEW) ──
-# Minimum % distance between EMA 20 and EMA 50 to consider it a "strong" trend.
-# Prevents trading in flat/sideways markets.
-TREND_STRENGTH_THRESHOLD = 0.01  # Lowered from 0.05% for easier signal detection
+# Minimum % distance between EMAs to consider a "strong" trend.
+TREND_STRENGTH_THRESHOLD = 0.01
+
+# ──────────────────────────────────────────────
+#  MACD SETTINGS (NEW)
+# ──────────────────────────────────────────────
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+
+# ──────────────────────────────────────────────
+#  BOLLINGER BAND SETTINGS (NEW)
+# ──────────────────────────────────────────────
+BB_PERIOD = 20
+BB_STD_DEV = 2.0
 
 # ──────────────────────────────────────────────
 #  RSI SETTINGS
@@ -47,18 +72,17 @@ RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
 USE_RSI_FILTER = True
 
-# ── RSI 50-Level Filter (NEW) ──
 # BUY only if RSI > 50 | SELL only if RSI < 50
+# (Only applied to EMA Pullback strategy)
 USE_RSI_50_CROSS = True
 
 # ──────────────────────────────────────────────
-#  VOLATILITY FILTER (NEW)
+#  VOLATILITY FILTER
 # ──────────────────────────────────────────────
-# Minimum ATR value to allow a trade (prevents trading in "dead" markets)
 USE_VOLATILITY_FILTER = True
 MIN_ATR_VALUE = {
-    "XAUUSD": 1.0,    # Gold needs higher ATR
-    "EURUSD": 0.0001,  # Forex needs much lower
+    "XAUUSD": 1.0,
+    "EURUSD": 0.0001,
     "GBPUSD": 0.0001,
     "BTCUSD": 10.0,
 }
@@ -71,30 +95,27 @@ PULLBACK_BARS = 5
 # ──────────────────────────────────────────────
 #  STOP LOSS & TAKE PROFIT
 # ──────────────────────────────────────────────
-SL_MODE = 1
+SL_MODE = 1          # 0 = Swing High/Low, 1 = ATR-based
 ATR_PERIOD = 14
 ATR_MULTIPLIER = 1.5
 SWING_LOOKBACK = 10
 RISK_REWARD = 2.0
 
 # ──────────────────────────────────────────────
-#  RISK & EXPIRY (NEW)
+#  RISK & EXPIRY
 # ──────────────────────────────────────────────
 USE_FIXED_LOT = True
 FIXED_LOT_SIZE = 0.10
 RISK_PERCENT = 1.0
 ACCOUNT_BALANCE = 10000
 
-# ── Signal Expiry ──
-# How long (in hours) a signal stays "active" before being auto-removed.
+# Signal Expiry (hours)
 SIGNAL_EXPIRY_HOURS = 1.0
 
-# ── Signal Cooldown ──
-# Minutes to wait before allowing another signal on the same symbol.
+# Cooldown between signals on same symbol (minutes)
 SIGNAL_COOLDOWN_MINUTES = 60
 
-# ── Daily Limit ──
-# Max signals allowed per symbol per day.
+# Max signals per symbol per day
 MAX_SIGNALS_PER_DAY = 5
 
 # ──────────────────────────────────────────────

@@ -1,14 +1,16 @@
 """
 ============================================================
-  SIGNALS.PY — Trade Signal Detection Logic (v2.0)
+  SIGNALS.PY — Multi-Strategy Trade Signal Engine (v3.0)
 ============================================================
-  Upgraded with:
-   - State management integration
-   - New candle detection
-   - Trend strength & Volatility filters
-   - RSI 50-cross filter
-   - Signal cooldown & Daily limits
-   - CSV logging with rich details
+  Strategies:
+   1. EMA Pullback + Engulfing (original)
+   2. MACD Crossover
+   3. Bollinger Band Bounce
+   4. EMA Crossover
+   5. RSI Reversal (oversold/overbought bounce)
+  
+  The engine checks ALL strategies and picks the best signal
+  with the highest confluence score.
 ============================================================
 """
 
@@ -18,9 +20,13 @@ import pandas as pd
 from datetime import datetime, timezone
 
 from indicators import (
-    calculate_ema, calculate_atr, calculate_rsi,
+    calculate_ema, calculate_sma, calculate_atr, calculate_rsi,
+    calculate_macd, calculate_bollinger_bands,
+    find_support_resistance,
     check_trend_strength, check_volatility,
     is_bullish_engulfing, is_bearish_engulfing,
+    is_hammer, is_shooting_star, is_doji,
+    detect_macd_crossover, detect_bollinger_signal, detect_ema_crossover,
     calculate_signal_strength,
 )
 import config
@@ -85,7 +91,7 @@ def log_signal_to_csv(signal: dict):
         with open(config.SIGNAL_LOG_FILE, mode="a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=[
                 "timestamp", "symbol", "type", "entry", "stop_loss", "take_profit",
-                "lot_size", "strength_score", "strength_label", "rsi", "trend", "atr"
+                "lot_size", "strength_score", "strength_label", "rsi", "trend", "atr", "strategy"
             ])
             if not file_exists:
                 writer.writeheader()
@@ -101,19 +107,18 @@ def log_signal_to_csv(signal: dict):
                 "strength_label": signal["strength_label"],
                 "rsi": signal["rsi"],
                 "trend": signal["trend"],
-                "atr": signal["atr"]
+                "atr": signal["atr"],
+                "strategy": signal["strategy"],
             })
     except Exception as e:
         print(f"  ⚠️ CSV Log Error: {e}")
 
 
 # ──────────────────────────────────────────────
-#  MARKET ANALYSIS (NEW)
+#  MARKET ANALYSIS
 # ──────────────────────────────────────────────
 def get_market_analysis_data(data: pd.DataFrame, symbol: str) -> dict:
-    """
-    Perform a real-time technical analysis on the provided data.
-    """
+    """Perform a real-time technical analysis on the provided data."""
     if len(data) < config.SLOW_EMA + 5:
         return {"error": "Not enough data for analysis"}
 
@@ -121,22 +126,35 @@ def get_market_analysis_data(data: pd.DataFrame, symbol: str) -> dict:
     ema_slow = calculate_ema(data, config.SLOW_EMA)
     rsi = calculate_rsi(data, config.RSI_PERIOD)
     atr = calculate_atr(data, config.ATR_PERIOD)
-    
+    macd = calculate_macd(data)
+    bb = calculate_bollinger_bands(data)
+
     curr_f = ema_fast.iloc[-1]
     curr_s = ema_slow.iloc[-1]
     curr_rsi = rsi.iloc[-1]
     curr_atr = atr.iloc[-1]
     price = data["Close"].iloc[-1]
-    
+
     trend = "UPTREND" if curr_f > curr_s else "DOWNTREND"
     trend_strong, distance = check_trend_strength(curr_f, curr_s)
-    
+
     # RSI Condition
     rsi_status = "Neutral"
     if curr_rsi > 70: rsi_status = "Overbought"
     elif curr_rsi < 30: rsi_status = "Oversold"
     elif curr_rsi > 50: rsi_status = "Bullish Bias"
     elif curr_rsi < 50: rsi_status = "Bearish Bias"
+
+    # MACD Status
+    macd_val = macd["macd_line"].iloc[-1]
+    signal_val = macd["signal_line"].iloc[-1]
+    macd_status = "Bullish" if macd_val > signal_val else "Bearish"
+
+    # Bollinger position
+    bb_pct = bb["percent_b"].iloc[-1]
+    if bb_pct > 0.8: bb_status = "Near Upper Band"
+    elif bb_pct < 0.2: bb_status = "Near Lower Band"
+    else: bb_status = "Mid Range"
 
     return {
         "symbol": symbol,
@@ -148,6 +166,10 @@ def get_market_analysis_data(data: pd.DataFrame, symbol: str) -> dict:
         "rsi_status": rsi_status,
         "atr": round(curr_atr, 6),
         "volatility": "High" if check_volatility(symbol, curr_atr) else "Low/Stable",
+        "macd_status": macd_status,
+        "macd_value": round(macd_val, 6),
+        "bb_status": bb_status,
+        "bb_percent": round(bb_pct, 3),
         "timestamp": datetime.now(timezone.utc).strftime("%H:%M UTC")
     }
 
@@ -156,9 +178,6 @@ def get_market_analysis_data(data: pd.DataFrame, symbol: str) -> dict:
 #  GET DAILY SUMMARY DATA
 # ──────────────────────────────────────────────
 def get_daily_summary() -> dict:
-    """
-    Read today's signals from the CSV log and compile a summary.
-    """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     summary = {
         "date": today,
@@ -192,88 +211,11 @@ def get_daily_summary() -> dict:
 
 
 # ──────────────────────────────────────────────
-#  FULL SIGNAL CHECK (ADVANCED)
+#  STRATEGY 1: EMA PULLBACK + ENGULFING
 # ──────────────────────────────────────────────
-def check_signal(data: pd.DataFrame, symbol_display: str, state_mgr) -> dict | None:
-    """
-    Main signal logic with all v2.0 upgrades.
-    """
-    # ── Step 1: Identify Closed Candle ──
-    # Usually yfinance last row is live. We want the latest CLOSED candle.
-    # We will treat data.iloc[-2] as the signal candle (the one that just closed).
-    if len(data) < 5: return None
-    
-    signal_candle = data.iloc[-2]
-    signal_timestamp = data.index[-2]
-    prev_candle = data.iloc[-3]
-    
-    # ── Step 2: Prevent Duplicates (Already sent for this closed candle?) ──
-    if not state_mgr.is_new_candle(symbol_display, signal_timestamp):
-        return None
-
-    # ── Step 3: Cooldown & Daily Limits ──
-    if state_mgr.is_in_cooldown(symbol_display):
-        return None
-    
-    if state_mgr.get_daily_count(symbol_display) >= config.MAX_SIGNALS_PER_DAY:
-        return None
-
-    # ── Step 4: Enough data for indicators? ──
-    min_candles = config.SLOW_EMA + 10
-    if len(data) < min_candles:
-        return None
-
-    # ── Step 5: Calculate Indicators ──
-    ema_fast = calculate_ema(data, config.FAST_EMA)
-    ema_slow = calculate_ema(data, config.SLOW_EMA)
-    atr = calculate_atr(data, config.ATR_PERIOD)
-    rsi = calculate_rsi(data, config.RSI_PERIOD)
-    
-    # Use values from the signal candle (iloc[-2])
-    idx = -2
-    curr_f = ema_fast.iloc[idx]
-    curr_s = ema_slow.iloc[idx]
-    curr_rsi = rsi.iloc[idx]
-    curr_atr = atr.iloc[idx]
-    
-    # ── Step 6: Trend & Strength Filter ──
-    trend = "UPTREND" if curr_f > curr_s else "DOWNTREND"
-    trend_strong, distance = check_trend_strength(curr_f, curr_s)
-    
-    if config.DEBUG_MODE:
-        print(f"  📊 {symbol_display} [{trend}] | EMA Sep: {distance:.3f}% | RSI: {curr_rsi:.1f} | ATR: {curr_atr:.5f}")
-
-    if not trend_strong:
-        if config.DEBUG_MODE: print(f"  🥱 {symbol_display} Trend too weak ({distance:.2f}%)")
-        return None
-
-    # ── Step 7: RSI 50 Filter (NEW) ──
-    if config.USE_RSI_50_CROSS:
-        if trend == "UPTREND" and curr_rsi < 50:
-            if config.DEBUG_MODE: print(f"  ⚠️ {symbol_display} RSI below 50 in Uptrend")
-            return None
-        if trend == "DOWNTREND" and curr_rsi > 50:
-            if config.DEBUG_MODE: print(f"  ⚠️ {symbol_display} RSI above 50 in Downtrend")
-            return None
-
-    # ── Step 8: Overbought/Oversold Filter ──
-    if config.USE_RSI_FILTER:
-        if trend == "UPTREND" and curr_rsi > config.RSI_OVERBOUGHT:
-            if config.DEBUG_MODE: print(f"  ⚠️ {symbol_display} Overbought")
-            return None
-        if trend == "DOWNTREND" and curr_rsi < config.RSI_OVERSOLD:
-            if config.DEBUG_MODE: print(f"  ⚠️ {symbol_display} Oversold")
-            return None
-
-    # ── Step 9: Volatility Filter (NEW) ──
-    vol_ok = check_volatility(symbol_display, curr_atr)
-    if not vol_ok:
-        if config.DEBUG_MODE: print(f"  💤 {symbol_display} Low Volatility (ATR: {curr_atr:.5f})")
-        return None
-
-    # ── Step 10: Pullback ──
+def _check_ema_pullback_engulfing(data, ema_fast, ema_slow, signal_candle, prev_candle, trend, idx):
+    """Original strategy: pullback into EMA zone + engulfing candle."""
     pullback = False
-    # Check if any of the last few candles touched the zone
     for i in range(idx - config.PULLBACK_BARS, idx + 1):
         try:
             low, high = data["Low"].iloc[i], data["High"].iloc[i]
@@ -282,37 +224,272 @@ def check_signal(data: pd.DataFrame, symbol_display: str, state_mgr) -> dict | N
             if low <= upper and high >= lower:
                 pullback = True
                 break
-        except: continue
-        
+        except:
+            continue
+
     if not pullback:
-        if config.DEBUG_MODE: print(f"  🔍 {symbol_display} No pullback in EMA zone")
         return None
 
-    # ── Step 11: Engulfing on Signal Candle ──
-    sig_type = None
     engulfing = False
-    
+    sig_type = None
     if trend == "UPTREND" and is_bullish_engulfing(prev_candle, signal_candle):
         sig_type, engulfing = "BUY", True
     elif trend == "DOWNTREND" and is_bearish_engulfing(prev_candle, signal_candle):
         sig_type, engulfing = "SELL", True
-        
-    if not sig_type:
-        if config.DEBUG_MODE: print(f"  🔸 {symbol_display} No engulfing pattern")
+
+    if sig_type:
+        return {"type": sig_type, "strategy": "EMA Pullback + Engulfing", "pullback": True, "engulfing": True}
+    return None
+
+
+# ──────────────────────────────────────────────
+#  STRATEGY 2: MACD CROSSOVER
+# ──────────────────────────────────────────────
+def _check_macd_crossover(macd_data, trend, curr_rsi, idx):
+    """MACD line crossing signal line, confirmed by trend direction."""
+    cross = detect_macd_crossover(macd_data, idx)
+    if cross is None:
         return None
 
-    # ── Step 12: Final Signal Construction ──
+    # Confirm with trend direction
+    if cross == "BUY" and trend == "UPTREND" and curr_rsi < 70:
+        return {"type": "BUY", "strategy": "MACD Crossover", "macd_confirms": True}
+    elif cross == "SELL" and trend == "DOWNTREND" and curr_rsi > 30:
+        return {"type": "SELL", "strategy": "MACD Crossover", "macd_confirms": True}
+    # Also allow counter-trend MACD signals with RSI confirmation
+    elif cross == "BUY" and curr_rsi < 40:
+        return {"type": "BUY", "strategy": "MACD Reversal", "macd_confirms": True}
+    elif cross == "SELL" and curr_rsi > 60:
+        return {"type": "SELL", "strategy": "MACD Reversal", "macd_confirms": True}
+    return None
+
+
+# ──────────────────────────────────────────────
+#  STRATEGY 3: BOLLINGER BAND BOUNCE
+# ──────────────────────────────────────────────
+def _check_bollinger_bounce(bb_data, data, curr_rsi, idx):
+    """Price bouncing off Bollinger Bands with RSI confirmation."""
+    bb_signal = detect_bollinger_signal(bb_data, data, idx)
+    if bb_signal is None:
+        return None
+
+    # RSI must confirm the bounce direction
+    if bb_signal == "BUY" and curr_rsi < 40:
+        return {"type": "BUY", "strategy": "Bollinger Bounce", "bb_confirms": True}
+    elif bb_signal == "SELL" and curr_rsi > 60:
+        return {"type": "SELL", "strategy": "Bollinger Bounce", "bb_confirms": True}
+    return None
+
+
+# ──────────────────────────────────────────────
+#  STRATEGY 4: EMA CROSSOVER
+# ──────────────────────────────────────────────
+def _check_ema_crossover(ema_fast, ema_slow, curr_rsi, vol_ok, idx):
+    """Fast EMA crossing slow EMA with volume/RSI confirmation."""
+    cross = detect_ema_crossover(ema_fast, ema_slow, idx)
+    if cross is None:
+        return None
+
+    if not vol_ok:
+        return None
+
+    if cross == "BUY" and curr_rsi > 45 and curr_rsi < 75:
+        return {"type": "BUY", "strategy": "EMA Crossover", "ema_cross_confirms": True}
+    elif cross == "SELL" and curr_rsi > 25 and curr_rsi < 55:
+        return {"type": "SELL", "strategy": "EMA Crossover", "ema_cross_confirms": True}
+    return None
+
+
+# ──────────────────────────────────────────────
+#  STRATEGY 5: RSI REVERSAL
+# ──────────────────────────────────────────────
+def _check_rsi_reversal(rsi_series, signal_candle, prev_candle, atr_value, idx):
+    """
+    RSI coming out of oversold/overbought with candle pattern confirmation.
+    """
+    try:
+        curr_rsi = rsi_series.iloc[idx]
+        prev_rsi = rsi_series.iloc[idx - 1]
+    except:
+        return None
+
+    sig_type = None
+    pattern = "none"
+
+    # Oversold bounce (RSI was < 30, now crosses above 30)
+    if prev_rsi < 30 and curr_rsi >= 30:
+        # Confirm with bullish candle
+        if signal_candle["Close"] > signal_candle["Open"]:
+            sig_type = "BUY"
+            if is_hammer(signal_candle, atr_value):
+                pattern = "hammer"
+
+    # Overbought rejection (RSI was > 70, now crosses below 70)
+    elif prev_rsi > 70 and curr_rsi <= 70:
+        if signal_candle["Close"] < signal_candle["Open"]:
+            sig_type = "SELL"
+            if is_shooting_star(signal_candle, atr_value):
+                pattern = "shooting_star"
+
+    if sig_type:
+        return {"type": sig_type, "strategy": "RSI Reversal", "candle_pattern": pattern}
+    return None
+
+
+# ──────────────────────────────────────────────
+#  FULL SIGNAL CHECK (MULTI-STRATEGY ENGINE)
+# ──────────────────────────────────────────────
+def check_signal(data: pd.DataFrame, symbol_display: str, state_mgr) -> dict | None:
+    """
+    Multi-strategy signal engine v3.0.
+    Checks all strategies, picks the one with highest confluence.
+    """
+    # ── Step 1: Identify Closed Candle ──
+    if len(data) < 5: return None
+
+    signal_candle = data.iloc[-2]
+    signal_timestamp = data.index[-2]
+    prev_candle = data.iloc[-3]
+
+    # ── Step 2: Prevent Duplicates ──
+    if not state_mgr.is_new_candle(symbol_display, signal_timestamp):
+        return None
+
+    # ── Step 3: Cooldown & Daily Limits ──
+    if state_mgr.is_in_cooldown(symbol_display):
+        return None
+
+    if state_mgr.get_daily_count(symbol_display) >= config.MAX_SIGNALS_PER_DAY:
+        return None
+
+    # ── Step 4: Enough data? ──
+    min_candles = max(config.SLOW_EMA, config.MACD_SLOW, config.BB_PERIOD) + 10
+    if len(data) < min_candles:
+        return None
+
+    # ── Step 5: Calculate ALL Indicators ──
+    ema_fast = calculate_ema(data, config.FAST_EMA)
+    ema_slow = calculate_ema(data, config.SLOW_EMA)
+    atr = calculate_atr(data, config.ATR_PERIOD)
+    rsi = calculate_rsi(data, config.RSI_PERIOD)
+    macd = calculate_macd(data, config.MACD_FAST, config.MACD_SLOW, config.MACD_SIGNAL)
+    bb = calculate_bollinger_bands(data, config.BB_PERIOD, config.BB_STD_DEV)
+
+    idx = -2
+    curr_f = ema_fast.iloc[idx]
+    curr_s = ema_slow.iloc[idx]
+    curr_rsi = rsi.iloc[idx]
+    curr_atr = atr.iloc[idx]
+
+    # ── Step 6: Trend & Strength Filter ──
+    trend = "UPTREND" if curr_f > curr_s else "DOWNTREND"
+    trend_strong, distance = check_trend_strength(curr_f, curr_s)
+    vol_ok = check_volatility(symbol_display, curr_atr)
+
+    if config.DEBUG_MODE:
+        print(f"  📊 {symbol_display} [{trend}] | EMA: {distance:.3f}% | RSI: {curr_rsi:.1f} | ATR: {curr_atr:.5f} | MACD: {macd['histogram'].iloc[idx]:.5f}")
+
+    # ── Step 7: Run ALL Strategies ──
+    candidates = []
+
+    # Strategy 1: EMA Pullback + Engulfing (needs trend strength)
+    if config.STRATEGY_EMA_PULLBACK and trend_strong and vol_ok:
+        result = _check_ema_pullback_engulfing(data, ema_fast, ema_slow, signal_candle, prev_candle, trend, idx)
+        if result:
+            # Check RSI filters
+            rsi_pass = True
+            if config.USE_RSI_50_CROSS:
+                if trend == "UPTREND" and curr_rsi < 50: rsi_pass = False
+                if trend == "DOWNTREND" and curr_rsi > 50: rsi_pass = False
+            if config.USE_RSI_FILTER:
+                if trend == "UPTREND" and curr_rsi > config.RSI_OVERBOUGHT: rsi_pass = False
+                if trend == "DOWNTREND" and curr_rsi < config.RSI_OVERSOLD: rsi_pass = False
+            if rsi_pass:
+                candidates.append(result)
+
+    # Strategy 2: MACD Crossover
+    if config.STRATEGY_MACD:
+        result = _check_macd_crossover(macd, trend, curr_rsi, idx)
+        if result:
+            candidates.append(result)
+
+    # Strategy 3: Bollinger Band Bounce
+    if config.STRATEGY_BOLLINGER:
+        result = _check_bollinger_bounce(bb, data, curr_rsi, idx)
+        if result:
+            candidates.append(result)
+
+    # Strategy 4: EMA Crossover
+    if config.STRATEGY_EMA_CROSS:
+        result = _check_ema_crossover(ema_fast, ema_slow, curr_rsi, vol_ok, idx)
+        if result:
+            candidates.append(result)
+
+    # Strategy 5: RSI Reversal
+    if config.STRATEGY_RSI_REVERSAL:
+        result = _check_rsi_reversal(rsi, signal_candle, prev_candle, curr_atr, idx)
+        if result:
+            candidates.append(result)
+
+    if not candidates:
+        if config.DEBUG_MODE:
+            print(f"  🔸 {symbol_display} No strategy triggered")
+        return None
+
+    # ── Step 8: Score & Pick Best ──
+    best_signal = None
+    best_score = -1
+
+    for candidate in candidates:
+        # Check cross-strategy confluence
+        macd_cross = detect_macd_crossover(macd, idx)
+        bb_sig = detect_bollinger_signal(bb, data, idx)
+        ema_cross = detect_ema_crossover(ema_fast, ema_slow, idx)
+
+        macd_confirms = (macd_cross == candidate["type"])
+        bb_confirms = (bb_sig == candidate["type"])
+        ema_cross_confirms = (ema_cross == candidate["type"])
+
+        strength = calculate_signal_strength(
+            trend=trend,
+            pullback=candidate.get("pullback", False),
+            engulfing=candidate.get("engulfing", False),
+            rsi_value=curr_rsi,
+            trend_strong=trend_strong,
+            volatility_strong=vol_ok,
+            ema_distance_pct=distance,
+            atr_value=curr_atr,
+            candle_body_size=abs(signal_candle["Close"] - signal_candle["Open"]),
+            macd_confirms=macd_confirms,
+            bb_confirms=bb_confirms,
+            ema_cross_confirms=ema_cross_confirms,
+            candle_pattern=candidate.get("candle_pattern", "none"),
+            strategies_triggered=[c["strategy"] for c in candidates],
+        )
+
+        if strength["score"] > best_score:
+            best_score = strength["score"]
+            best_signal = {
+                "candidate": candidate,
+                "strength": strength,
+            }
+
+    # ── Step 9: Minimum Confidence Filter ──
+    if best_score < config.MIN_SIGNAL_SCORE:
+        if config.DEBUG_MODE:
+            print(f"  ⚠️ {symbol_display} Signal too weak ({best_score}% < {config.MIN_SIGNAL_SCORE}%)")
+        return None
+
+    # ── Step 10: Build Final Signal ──
+    sig_type = best_signal["candidate"]["type"]
     entry = signal_candle["Close"]
     sl = calculate_stop_loss(sig_type, entry, data, curr_atr)
     tp = calculate_take_profit(sig_type, entry, sl)
     lot = calculate_lot_size(entry, sl)
-    
-    strength = calculate_signal_strength(
-        trend=trend, pullback=pullback, engulfing=engulfing,
-        rsi_value=curr_rsi, trend_strong=trend_strong,
-        volatility_strong=vol_ok, ema_distance_pct=distance,
-        atr_value=curr_atr, candle_body_size=abs(signal_candle["Close"] - signal_candle["Open"])
-    )
+    strength = best_signal["strength"]
+
+    # List all triggered strategies
+    strategies_list = " + ".join([c["strategy"] for c in candidates])
 
     signal = {
         "type": sig_type,
@@ -328,11 +505,15 @@ def check_signal(data: pd.DataFrame, symbol_display: str, state_mgr) -> dict | N
         "strength_label": strength["label"],
         "strength_emoji": strength["emoji"],
         "strength_details": strength["details"],
-        "strategy": "EMA Pullback + Engulfing",
+        "strategy": strategies_list,
+        "strategies_count": len(candidates),
         "timestamp": signal_timestamp.isoformat()
     }
 
-    # Mark this candle as officially "processed" and "signal sent"
+    if config.DEBUG_MODE:
+        print(f"  🎯 {symbol_display} [{sig_type}] via {strategies_list} (Score: {strength['score']}%)")
+
+    # Mark this candle as processed
     state_mgr.mark_candle_processed(symbol_display, signal_timestamp)
     log_signal_to_csv(signal)
     return signal
