@@ -267,12 +267,29 @@ def send_daily_summary(summary: dict, state_mgr, chat_id=None) -> bool:
         for s in summary["signals"][-5:]:
             emoji = "🟢" if s["type"] == "BUY" else "🔴"
             msg += f"{emoji} {s['symbol']} {s['type']} @ {s['entry']}\n"
-    
     if chat_id:
         return send_api_message(msg, chat_id)
     else:
         # Broadcast if no specific chat_id
         return broadcast_message(msg, state_mgr)
+
+def send_status(state_mgr, chat_id=None) -> bool:
+    """Send bot health and active signal status."""
+    active_signals = state_mgr.get_active_signals()
+    msg = "<b>🤖 BOT STATUS</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+    msg += "🟢 Status: <b>Online</b>\n"
+    msg += f"📊 Monitoring: <code>{len(config.SYMBOLS)} pairs</code>\n"
+    msg += f"👥 Subscribers: <code>{len(state_mgr.get_subscribers())}</code>\n"
+    
+    if active_signals:
+        msg += "\n<b>📈 Active Signals:</b>\n"
+        for symbol, data in active_signals.items():
+            type_emoji = "🟢" if data['type'] == 'BUY' else "🔴"
+            msg += f"• {type_emoji} {symbol} ({data['type']}) @ {data['entry']}\n"
+    else:
+        msg += "\n<i>No active signals right now.</i>\n"
+        
+    return send_message(msg, chat_id)
 
 def broadcast_message(text: str, state_mgr) -> bool:
     """Send a plain text message to all subscribers."""
