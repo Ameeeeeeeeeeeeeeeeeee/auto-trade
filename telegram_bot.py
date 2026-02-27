@@ -1,17 +1,21 @@
 """
 ============================================================
-  TELEGRAM_BOT.PY — Telegram Interaction (v2.0)
+  TELEGRAM_BOT.PY — Telegram Interaction (v3.0)
 ============================================================
   Upgraded with:
-   - Command support (/status, /summary, /help)
+   - Command support (/status, /summary, /help, /chart, /analyze)
    - Rich signal formatting with strength bars
+   - Chart image sending via Telegram
+   - Deep word-based analysis
    - Non-blocking update handling
 ============================================================
 """
 
+import os
 import requests
 import config
 from datetime import datetime, timezone
+from chart_analysis import generate_chart, generate_deep_analysis, format_deep_analysis_message
 
 # Track the last update ID to avoid processing the same message twice
 LAST_UPDATE_ID = 0
@@ -52,7 +56,7 @@ def format_signal_message(signal: dict) -> str:
 # ──────────────────────────────────────────────
 #  COMMANDS HANDLERS
 # ──────────────────────────────────────────────
-def handle_commands(state_mgr, summary_func, analysis_func, fetch_func):
+def handle_commands(state_mgr, summary_func, analysis_func, fetch_func, deep_analysis_func=None):
     """
     Check for new commands from Telegram.
     Non-blocking polling using getUpdates.
@@ -100,6 +104,8 @@ def handle_commands(state_mgr, summary_func, analysis_func, fetch_func):
                 send_daily_summary(summary, state_mgr, chat_id)
             elif cmd == "/price":
                 handle_price_command(args, fetch_func, chat_id)
+            elif cmd == "/chart":
+                handle_chart_command(args, fetch_func, chat_id)
             elif cmd == "/analyze":
                 handle_analyze_command(args, fetch_func, analysis_func, chat_id)
             elif cmd == "/help":
@@ -108,7 +114,8 @@ def handle_commands(state_mgr, summary_func, analysis_func, fetch_func):
                     "/start - Subscribe to signals\n"
                     "/stop - Unsubscribe\n"
                     "/price [pair] - Get live prices\n"
-                    "/analyze [pair] - Deep technical analysis\n"
+                    "/chart [pair] - 📊 Candlestick chart with indicators\n"
+                    "/analyze [pair] - 🧠 Deep word + chart analysis\n"
                     "/status - Bot health & active signals\n"
                     "/summary - Today's results\n"
                     "/help - Show this list"
@@ -120,7 +127,7 @@ def handle_commands(state_mgr, summary_func, analysis_func, fetch_func):
 
 
 # ──────────────────────────────────────────────
-#  PRICE & ANALYSIS HANDLERS (NEW)
+#  PRICE, CHART & ANALYSIS HANDLERS
 # ──────────────────────────────────────────────
 def handle_price_command(args, fetch_func, chat_id):
     if args:
@@ -145,7 +152,43 @@ def handle_price_command(args, fetch_func, chat_id):
                 msg += f"• {s}: <code>{data['Close'].iloc[-1]:.5f}</code>\n"
         send_message(msg, chat_id)
 
+
+def handle_chart_command(args, fetch_func, chat_id):
+    """Handle /chart [pair] — Generate and send a candlestick chart image."""
+    if not args:
+        send_message("❓ Please specify a pair. E.g., <code>/chart XAUUSD</code>\n\nAvailable: " + ", ".join(config.SYMBOLS.keys()), chat_id)
+        return
+    
+    symbol = args[0].upper()
+    ticker = config.SYMBOLS.get(symbol)
+    if not ticker:
+        send_message(f"❌ Unknown symbol: {symbol}. Available: {', '.join(config.SYMBOLS.keys())}", chat_id)
+        return
+    
+    send_message(f"📊 Generating chart for {symbol}... Please wait.", chat_id)
+    data = fetch_func(ticker, symbol)
+    if data is None or data.empty:
+        send_message("❌ Error fetching market data.", chat_id)
+        return
+    
+    chart_path = generate_chart(data, symbol)
+    if chart_path and os.path.exists(chart_path):
+        caption = f"📊 {symbol} | {config.TIMEFRAME} | EMA {config.FAST_EMA}/{config.SLOW_EMA} + RSI"
+        if send_photo_api(chart_path, caption, chat_id):
+            pass  # Success
+        else:
+            send_message("❌ Failed to send chart image.", chat_id)
+        # Clean up temp file
+        try:
+            os.remove(chart_path)
+        except:
+            pass
+    else:
+        send_message("❌ Failed to generate chart.", chat_id)
+
+
 def handle_analyze_command(args, fetch_func, analysis_func, chat_id):
+    """Handle /analyze [pair] — Deep word + chart analysis."""
     if not args:
         send_message("❓ Please specify a pair to analyze. E.g., <code>/analyze XAUUSD</code>", chat_id)
         return
@@ -156,29 +199,45 @@ def handle_analyze_command(args, fetch_func, analysis_func, chat_id):
         send_message(f"❌ Unknown symbol: {symbol}. Available: {', '.join(config.SYMBOLS.keys())}", chat_id)
         return
     
-    send_message(f"🔍 Analyzing {symbol}... Please wait.", chat_id)
+    send_message(f"🧠 Running deep analysis on {symbol}... Please wait.", chat_id)
     data = fetch_func(ticker, symbol)
     if data is None or data.empty:
         send_message("❌ Error fetching market data.", chat_id)
         return
     
-    analysis = analysis_func(data, symbol)
-    if "error" in analysis:
-        send_message(f"❌ {analysis['error']}", chat_id)
-        return
+    # ── Step 1: Generate and send chart ──
+    chart_path = generate_chart(data, symbol)
+    if chart_path and os.path.exists(chart_path):
+        caption = f"📊 {symbol} | {config.TIMEFRAME} | Chart Analysis"
+        send_photo_api(chart_path, caption, chat_id)
+        try:
+            os.remove(chart_path)
+        except:
+            pass
     
-    msg = (
-        f"<b>📊 MARKET ANALYSIS: {symbol}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💵 Price: <code>{analysis['price']}</code>\n"
-        f"📈 Trend: <b>{analysis['trend']}</b> ({analysis['trend_strength']})\n"
-        f"📏 EMA Sep: <code>{analysis['ema_separation']}%</code>\n"
-        f"💠 RSI: <code>{analysis['rsi']}</code> ({analysis['rsi_status']})\n"
-        f"📉 ATR: <code>{analysis['atr']}</code>\n"
-        f"🌊 Volatility: {analysis['volatility']}\n\n"
-        f"🕒 <i>{analysis['timestamp']}</i>"
-    )
-    send_message(msg, chat_id)
+    # ── Step 2: Generate and send deep word analysis ──
+    deep = generate_deep_analysis(data, symbol)
+    if deep and "error" not in deep:
+        msg = format_deep_analysis_message(deep)
+        send_message(msg, chat_id)
+    else:
+        # Fallback to basic analysis
+        analysis = analysis_func(data, symbol)
+        if "error" in analysis:
+            send_message(f"❌ {analysis['error']}", chat_id)
+            return
+        msg = (
+            f"<b>📊 MARKET ANALYSIS: {symbol}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 Price: <code>{analysis['price']}</code>\n"
+            f"📈 Trend: <b>{analysis['trend']}</b> ({analysis['trend_strength']})\n"
+            f"📏 EMA Sep: <code>{analysis['ema_separation']}%</code>\n"
+            f"💠 RSI: <code>{analysis['rsi']}</code> ({analysis['rsi_status']})\n"
+            f"📉 ATR: <code>{analysis['atr']}</code>\n"
+            f"🌊 Volatility: {analysis['volatility']}\n\n"
+            f"🕒 <i>{analysis['timestamp']}</i>"
+        )
+        send_message(msg, chat_id)
 
 
 # ──────────────────────────────────────────────
@@ -250,3 +309,27 @@ def send_api_message(text: str, chat_id=None) -> bool:
         response = requests.post(url, json=payload, timeout=10)
         return response.status_code == 200
     except: return False
+
+
+def send_photo_api(photo_path: str, caption: str = "", chat_id=None) -> bool:
+    """Send a photo (image file) to a Telegram chat."""
+    if config.TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE": return False
+    
+    target_id = chat_id if chat_id else config.TELEGRAM_CHAT_ID
+    if not target_id: return False
+
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendPhoto"
+    try:
+        with open(photo_path, "rb") as photo_file:
+            payload = {
+                "chat_id": target_id,
+                "caption": caption,
+                "parse_mode": "HTML",
+            }
+            files = {"photo": photo_file}
+            response = requests.post(url, data=payload, files=files, timeout=30)
+            return response.status_code == 200
+    except Exception as e:
+        if config.DEBUG_MODE:
+            print(f"  ⚠️ Photo Send Error: {e}")
+        return False
